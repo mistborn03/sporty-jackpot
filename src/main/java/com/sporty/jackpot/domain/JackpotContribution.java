@@ -6,12 +6,10 @@ import java.time.Instant;
 /**
  * Records that a bet contributed to a jackpot pool.
  * <p>
- * {@code currentJackpotAmount} is a SNAPSHOT of the pool right after this
- * contribution was applied. It is intentionally preserved (never
- * recomputed) so that {@code /evaluate} can later judge this bet's reward
- * chance against the pool state the bettor actually contributed to -
- * rather than whatever the pool happens to be at evaluation time, which
- * may have already been reset by someone else's win in the meantime.
+ * {@code currentJackpotAmount} is the pool value right after this
+ * contribution was applied - a historical record of what this bet grew the
+ * pool to. It is not what {@code /evaluate} pays out: a win takes the live
+ * pool at evaluation time, which includes everything contributed since.
  */
 public record JackpotContribution(
         String betId,

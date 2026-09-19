@@ -23,6 +23,15 @@ public class JackpotEvaluationRepository {
         return Optional.ofNullable(store.putIfAbsent(evaluation.betId(), evaluation));
     }
 
+    /**
+     * Writes the final outcome for an evaluation this caller already claimed
+     * via {@link #saveIfAbsent}. Only the caller that won that claim reaches
+     * the payout, so this cannot clobber another evaluation's result.
+     */
+    public void recordPayout(JackpotEvaluation evaluation) {
+        store.put(evaluation.betId(), evaluation);
+    }
+
     public Optional<JackpotEvaluation> findByBetId(String betId) {
         return Optional.ofNullable(store.get(betId));
     }

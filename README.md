@@ -11,6 +11,7 @@ bets for jackpot rewards. Built for the Jackpot BE home assignment.
 - **No real database** - all persistence is in-memory (`ConcurrentHashMap`-backed
   repositories), per the assignment's condition.
 - Lombok for boilerplate.
+- springdoc-openapi for Swagger UI at `/swagger-ui.html`.
 
 ## Running it
 
@@ -29,18 +30,76 @@ The app starts on `http://localhost:8080` and seeds two demo jackpots on boot
 | `JP-FIXED` | Fixed 5% of bet amount | Fixed 10% win chance |
 | `JP-VARIABLE` | Starts at 10%, decays 1% per $100 pool growth, floors at 2% | Starts at 5%, grows 2% per $100 pool growth, guaranteed win at pool >= $1000 |
 
+## Contribution and reward rules
+
+Both variable models move their percentage in whole **steps** of pool growth.
+Growth is measured from the jackpot's *initial* pool, not from zero, and a
+partially completed step changes nothing until it is crossed.
+
+### Variable contribution - decays as the pool grows
+
+```
+growth       = currentPool - initialPool
+steps        = floor(growth / contributionStepAmount)
+rate         = baseContributionPct - (contributionDecayRate * steps)
+effectivePct = max(rate, minContributionPct)        # floor, never negative
+contribution = betAmount * effectivePct             # HALF_UP to 2 dp
+```
+
+With base 10%, decay 1%, floor 2%, step 100.00, initial pool 50.00, on a 100.00 bet:
+
+| Pool | Growth | Steps | Rate | Contributes |
+|---|---|---|---|---|
+| 50.00 | 0.00 | 0 | 10% | 10.00 |
+| 149.00 | 99.00 | 0 | 10% | 10.00 (step not yet crossed) |
+| 150.00 | 100.00 | 1 | 9% | 9.00 |
+| 550.00 | 500.00 | 5 | 5% | 5.00 |
+| 950.00 | 900.00 | 9 | 2% | 2.00 (floor reached) |
+| 5050.00 | 5000.00 | 50 | 2% | 2.00 (floor holds) |
+
+The floor is what stops a large pool from taking a zero or negative cut, which
+would otherwise leave it unable to grow at all.
+
+### Variable reward - grows as the pool grows
+
+```
+growth = currentPool - initialPool
+steps  = floor(growth / rewardStepAmount)
+chance = baseRewardChance + (rewardGrowthRate * steps)
+
+if currentPool >= poolLimit  ->  chance = 100%, regardless of the above
+```
+
+With base 5%, growth 2%, step 100.00, initial pool 50.00, limit 1000.00:
+
+| Pool | Growth | Steps | Win chance |
+|---|---|---|---|
+| 50.00 | 0.00 | 0 | 5% |
+| 149.00 | 99.00 | 0 | 5% (step not yet crossed) |
+| 150.00 | 100.00 | 1 | 7% |
+| 550.00 | 500.00 | 5 | 15% |
+| 1000.00 | — | — | 100% (guaranteed by the limit) |
+
+Below `poolLimit` the chance is uncapped and can exceed 100% on its own; that
+is harmless, since the limit guarantees a win first.
+
 ## API
 
 | Method | Path | Purpose | Codes |
 |---|---|---|---|
-| `POST` | `/bets` | Publish a bet to the mocked `jackpot-bets` topic | `202`, `400`, `409` |
+| `POST` | `/bets` | Publish a bet to the mocked `jackpot-bets` topic | `202`, `400`, `404`, `409` |
 | `POST` | `/bets/{betId}/evaluate` | Evaluate a bet for a jackpot reward | `200`, `404` |
 | `GET` | `/bets/{betId}` | Inspect a published bet (debug, not in spec) | `200`, `404` |
-| `GET` | `/jackpots` | Inspect jackpot pool state (debug, not in spec) | `200` |
+| `POST` | `/jackpots` | Create a jackpot | `201`, `400`, `409` |
+| `GET` | `/jackpots` | List jackpots with current pool state | `200` |
+| `GET` | `/jackpots/{jackpotId}` | Fetch a single jackpot | `200`, `404` |
+
+Interactive docs (Swagger UI): **http://localhost:8080/swagger-ui.html**
+(OpenAPI JSON at `/v3/api-docs`).
 
 See **[API.md](API.md)** for a step-wise walkthrough with curls, expected
 responses, and the edge cases worth checking (duplicate betId, repeated
-evaluation, guaranteed win and pool reset, unmatched jackpotId).
+evaluation, live-pool payout, jackpot creation validation).
 
 ## Design notes and assumptions
 
@@ -58,15 +117,19 @@ The spec deliberately leaves several rules open-ended; here's what was assumed a
   contribution, growing for reward), floored/capped accordingly. This is
   configurable per-jackpot rather than hardcoded.
 
-- **Reward evaluation uses a pool *snapshot*, not the live pool.** Each
-  `JackpotContribution` stores `currentJackpotAmount` - the pool value right after
-  that specific contribution was applied. `/evaluate` judges a bet's reward chance
-  against that snapshot rather than the jackpot's live current pool. This matters
-  because the pool can be reset by someone else's win between when a bet
-  contributes and when it's evaluated; without a snapshot, a bet's odds would
-  depend on evaluation *order*, not on what it actually contributed to. The spec's
-  own schema (asking `JackpotContribution` to store "Current Jackpot Amount") is
-  what suggested this design.
+- **A win takes the live pool, not the pool as it stood at contribution time.**
+  Winning a jackpot means winning what is in the pot *now*, including everything
+  other bets have added since. If user A bets (pool 50 -> 60) and user B bets
+  after them (pool 60 -> 70), A winning pays out 70. Both the reward chance and
+  the payout read the live pool. `JackpotContribution.currentJackpotAmount` is
+  kept as a historical record of what each bet grew the pool to, but is no longer
+  what evaluation is judged against. The trade-off is that a bet's odds and payout
+  now depend on *when* it is evaluated relative to other activity; that is
+  inherent to a shared pool, and is what "winning the jackpot" normally means.
+
+- **The payout reads and resets the pool atomically.** `Jackpot.claimPool()` does
+  both in one synchronized step - a contribution landing between a separate read
+  and reset would be paid to nobody and then wiped.
 
 - **A bet with no contribution cannot be evaluated.** If `jackpotId` never matched
   a known jackpot, or the bet doesn't exist, `/evaluate` returns `404` rather than
@@ -89,14 +152,22 @@ The spec deliberately leaves several rules open-ended; here's what was assumed a
   It has to sit at the API edge because with a real Kafka producer the consumer
   hasn't processed the bet by the time publish returns.
 
-- **Non-matching jackpot IDs are accepted at publish time, rejected at consume
-  time.** `POST /bets` doesn't validate the jackpot exists - that check happens in
-  the consumer, preserving the producer/consumer decoupling a real Kafka setup
-  would have. The betId is still registered (`BetRepository`); it simply produces no
-  `JackpotContribution`.
+- **`POST /bets` rejects an unknown jackpotId with 404.** The bet is validated
+  against the jackpot store before anything is published, so a typo fails
+  immediately rather than being accepted and silently producing no contribution.
+  This trades away some producer/consumer decoupling - a real Kafka producer would
+  not consult the jackpot store - in exchange for the caller learning about the
+  mistake at the point they made it. The consumer still re-checks, since with real
+  Kafka a jackpot could be removed between publish and consume.
+
+- **Jackpots can be created at runtime via `POST /jackpots`.** Note this endpoint
+  is unauthenticated, as is the rest of the service: anything that can reach it can
+  create a jackpot with a 100% reward chance. Real deployments would put jackpot
+  administration behind auth or in a separate admin service - see
+  "intentionally out of scope" below.
 
 - **Pool mutations are synchronized per-jackpot.** Since there's no database
-  transaction to lean on, `Jackpot.addToPool()` / `resetPool()` are synchronized
+  transaction to lean on, `Jackpot.addToPool()` / `claimPool()` are synchronized
   methods so concurrent bets against the same jackpot don't race on a
   read-modify-write of the pool amount.
 

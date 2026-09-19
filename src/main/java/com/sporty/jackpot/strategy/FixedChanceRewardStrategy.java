@@ -11,7 +11,7 @@ import java.util.concurrent.ThreadLocalRandom;
 public class FixedChanceRewardStrategy implements RewardStrategy {
 
     @Override
-    public boolean evaluateWin(BigDecimal poolAmountAtContribution, Jackpot jackpot) {
+    public boolean evaluateWin(BigDecimal currentPoolAmount, Jackpot jackpot) {
         double roll = ThreadLocalRandom.current().nextDouble();
         return roll < jackpot.getFixedRewardChance().doubleValue();
     }

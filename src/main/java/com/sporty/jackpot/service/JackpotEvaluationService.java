@@ -41,9 +41,10 @@ public class JackpotEvaluationService {
      * - Evaluation is idempotent per bet, for losses as well as wins: the
      *   dice are rolled at most once and the outcome is then replayed. A
      *   caller cannot retry a losing bet until it wins.
-     * - The reward chance is judged against the pool snapshot taken at
-     *   CONTRIBUTION time (see JackpotContribution javadoc), not whatever
-     *   the jackpot's live pool happens to be now.
+     * - Both the reward chance and the payout use the jackpot's LIVE pool at
+     *   evaluation time, not the pool as it stood when this bet contributed.
+     *   Winning a jackpot means winning what is in the pot now, including
+     *   everything other bets have added since.
      */
     public EvaluationResponse evaluate(String betId) {
         JackpotContribution contribution = contributionRepository.findByBetId(betId)
@@ -58,33 +59,40 @@ public class JackpotEvaluationService {
                 .orElseThrow(() -> new JackpotNotFoundException(contribution.jackpotId()));
 
         RewardStrategy strategy = rewardStrategyFactory.get(jackpot.getRewardType());
-        boolean won = strategy.evaluateWin(contribution.currentJackpotAmount(), jackpot);
+        boolean won = strategy.evaluateWin(jackpot.getCurrentPoolAmount(), jackpot);
 
-        // Reward amount = the pool value this bet's contribution was measured against.
-        BigDecimal rewardAmount = won ? contribution.currentJackpotAmount() : null;
         JackpotEvaluation evaluation = new JackpotEvaluation(
                 betId, contribution.userId(), contribution.jackpotId(),
-                won, rewardAmount, Instant.now()
+                won, null, Instant.now()
         );
 
+        // Claim the evaluation slot before touching the pool: if another caller
+        // got here first, this one must not pay out on top of theirs.
         Optional<JackpotEvaluation> claimedByAnother = evaluationRepository.saveIfAbsent(evaluation);
         if (claimedByAnother.isPresent()) {
             return toResponse(claimedByAnother.get(), true);
         }
 
-        if (won) {
-            rewardRepository.save(new JackpotReward(
-                    betId, contribution.userId(), contribution.jackpotId(),
-                    rewardAmount, evaluation.createdAt()
-            ));
-            jackpot.resetPool();
-            log.info("Bet {} WON jackpot {} - amount={} - pool reset to {}",
-                    betId, jackpot.getJackpotId(), rewardAmount, jackpot.getInitialPoolAmount());
-        } else {
+        if (!won) {
             log.info("Bet {} evaluated - no win (jackpot={})", betId, jackpot.getJackpotId());
+            return toResponse(evaluation, false);
         }
 
-        return toResponse(evaluation, false);
+        BigDecimal rewardAmount = jackpot.claimPool();
+        JackpotEvaluation paid = new JackpotEvaluation(
+                betId, contribution.userId(), contribution.jackpotId(),
+                true, rewardAmount, evaluation.createdAt()
+        );
+        evaluationRepository.recordPayout(paid);
+        rewardRepository.save(new JackpotReward(
+                betId, contribution.userId(), contribution.jackpotId(),
+                rewardAmount, paid.createdAt()
+        ));
+
+        log.info("Bet {} WON jackpot {} - amount={} - pool reset to {}",
+                betId, jackpot.getJackpotId(), rewardAmount, jackpot.getInitialPoolAmount());
+
+        return toResponse(paid, false);
     }
 
     private EvaluationResponse toResponse(JackpotEvaluation evaluation, boolean alreadyEvaluated) {

@@ -18,8 +18,8 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body(HttpStatus.NOT_FOUND, ex.getMessage()));
     }
 
-    @ExceptionHandler(DuplicateBetException.class)
-    public ResponseEntity<Object> handleDuplicateBet(DuplicateBetException ex) {
+    @ExceptionHandler({DuplicateBetException.class, DuplicateJackpotException.class})
+    public ResponseEntity<Object> handleDuplicate(RuntimeException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body(HttpStatus.CONFLICT, ex.getMessage()));
     }
 

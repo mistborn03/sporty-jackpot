@@ -7,10 +7,9 @@ import java.math.BigDecimal;
 /**
  * Decides whether a bet wins the jackpot reward.
  * <p>
- * {@code poolAmountAtContribution} is the pool snapshot recorded on the
- * bet's {@code JackpotContribution} (see that class's javadoc for why a
- * snapshot is used instead of the jackpot's live current pool).
+ * {@code currentPoolAmount} is the jackpot's live pool at evaluation time,
+ * which is also what a win pays out.
  */
 public interface RewardStrategy {
-    boolean evaluateWin(BigDecimal poolAmountAtContribution, Jackpot jackpot);
+    boolean evaluateWin(BigDecimal currentPoolAmount, Jackpot jackpot);
 }

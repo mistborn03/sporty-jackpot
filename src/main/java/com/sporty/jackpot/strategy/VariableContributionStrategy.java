@@ -7,13 +7,9 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 
 /**
- * Contributes a percentage that starts at {@code baseContributionPct} and
- * decays by {@code contributionDecayRate} for every {@code contributionStepAmount}
- * the pool has grown past its initial value, floored at {@code minContributionPct}.
- * <p>
- * Example: base 10%, decay 0.5% per $1,000 grown, floor 2%. At pool = initial + $4,000
- * (4 steps), effective rate = 10% - 4*0.5% = 8%. At pool = initial + $16,000+,
- * the rate has decayed to the 2% floor.
+ * Contribution percentage that decays a step at a time as the pool grows,
+ * floored at {@code minContributionPct}. See the README for the rule and
+ * worked examples.
  */
 @Component
 public class VariableContributionStrategy implements ContributionStrategy {
